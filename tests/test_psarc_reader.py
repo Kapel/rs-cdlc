@@ -4,11 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from rocksmith_cdlc_generator.psarc_reader import (
-    EncryptedTocError,
-    PsarcReader,
-    PsarcReaderError,
-)
+from rocksmith_cdlc_generator.psarc_reader import PsarcReader, PsarcReaderError
 
 from .psarc_builder import build_psarc
 
@@ -17,15 +13,29 @@ def test_round_trips_named_entries(tmp_path: Path) -> None:
     path = build_psarc(
         tmp_path / "song_p.psarc",
         [
-            ("manifests/songs_dlc_key/key.json", b'{"Attributes": {"AppId": "248750"}}', True),
+            ("manifests/songs_dlc_key/key.json", b'{"Entries": {}}', True),
             ("audio/song.wem", b"\x00" * 128, True),
             ("guitar_lead.sng", b"LEAD", True),
         ],
     )
-    reader = PsarcReader(path)
-    assert set(reader.entries) == {"manifests/songs_dlc_key/key.json", "audio/song.wem", "guitar_lead.sng"}
-    assert reader.read_entry("manifests/songs_dlc_key/key.json") == b'{"Attributes": {"AppId": "248750"}}'
-    assert reader.read_entry("guitar_lead.sng") == b"LEAD"
+    with PsarcReader(path) as reader:
+        assert set(reader.entries) == {"manifests/songs_dlc_key/key.json", "audio/song.wem", "guitar_lead.sng"}
+        assert reader.read_entry("manifests/songs_dlc_key/key.json") == b'{"Entries": {}}'
+        assert reader.read_entry("guitar_lead.sng") == b"LEAD"
+
+
+def test_round_trips_encrypted_toc(tmp_path: Path) -> None:
+    path = build_psarc(
+        tmp_path / "song_p.psarc",
+        [
+            ("manifests/songs_dlc_key/key.json", b'{"Entries": {}}', True),
+            ("guitar_lead.sng", b"LEAD", True),
+        ],
+        encrypt_toc=True,
+    )
+    with PsarcReader(path) as reader:
+        assert set(reader.entries) == {"manifests/songs_dlc_key/key.json", "guitar_lead.sng"}
+        assert reader.read_entry("guitar_lead.sng") == b"LEAD"
 
 
 def test_round_trips_raw_full_cluster_entry(tmp_path: Path) -> None:
@@ -36,8 +46,8 @@ def test_round_trips_raw_full_cluster_entry(tmp_path: Path) -> None:
             ("audio/song.wem", big, False),
         ],
     )
-    reader = PsarcReader(path)
-    assert reader.read_entry("audio/song.wem") == big
+    with PsarcReader(path) as reader:
+        assert reader.read_entry("audio/song.wem") == big
 
 
 def test_rejects_bad_magic(tmp_path: Path) -> None:
@@ -54,18 +64,8 @@ def test_rejects_truncated_file(tmp_path: Path) -> None:
         PsarcReader(path)
 
 
-def test_rejects_encrypted_toc(tmp_path: Path) -> None:
-    path = build_psarc(
-        tmp_path / "song_p.psarc",
-        [("guitar_lead.sng", b"LEAD", True)],
-        encrypt_toc=True,
-    )
-    with pytest.raises(EncryptedTocError):
-        PsarcReader(path)
-
-
 def test_missing_entry_raises_key_error(tmp_path: Path) -> None:
     path = build_psarc(tmp_path / "song_p.psarc", [("guitar_lead.sng", b"LEAD", True)])
-    reader = PsarcReader(path)
-    with pytest.raises(KeyError):
-        reader.read_entry("nope.sng")
+    with PsarcReader(path) as reader:
+        with pytest.raises(KeyError):
+            reader.read_entry("nope.sng")

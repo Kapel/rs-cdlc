@@ -13,7 +13,7 @@ from .dlcbuilder import prepare_dlcbuilder_project
 from .guitar_authoring import build_project_guitar_chart
 from .guitar_validation import validate_guitar_project, validate_guitar_project_to_disk
 from .guitarpro_import import import_project_guitarpro
-from .library_doctor import quarantine_broken, render_report, scan_library
+from .library_doctor import move_broken, quarantine_broken, render_report, scan_library
 from .mapping_pipeline import map_project_bass
 from .metadata_providers import identify_project_metadata, select_project_metadata
 from .midi_import import import_project_midi
@@ -253,10 +253,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scan a folder of Rocksmith .psarc files and report health issues (read-only)",
     )
     doctor.add_argument("directory", type=Path, help="Directory to scan recursively for .psarc files")
+    doctor.add_argument("--recursive", action="store_true", help="Recurse into subdirectories (default: dlc root only)")
     doctor.add_argument("--platform", choices=["pc", "mac", "xbox", "ps3"], help="Expected platform; mismatches are flagged")
     doctor.add_argument("--rocksmith-root", type=Path, help="Optional Rocksmith root folder to check D3DX9_42.dll")
     doctor.add_argument("--json", action="store_true", help="Print the full report as JSON")
     doctor.add_argument("--quarantine", type=Path, help="Copy error files into this directory for review")
+    doctor.add_argument("--move-to", type=Path, help="MOVE error files into this directory (removes them from the dlc folder)")
     return parser
 
 
@@ -459,6 +461,7 @@ def main() -> None:
             args.directory,
             expected_platform=args.platform,
             rocksmith_root=args.rocksmith_root,
+            recursive=args.recursive,
         )
         if args.json:
             print(report.model_dump_json(indent=2))
@@ -467,6 +470,9 @@ def main() -> None:
         if args.quarantine is not None:
             copied = quarantine_broken(report, args.quarantine)
             print(f"Quarantined {len(copied)} file(s) to {args.quarantine.resolve()}")
+        if args.move_to is not None:
+            moved = move_broken(report, args.move_to)
+            print(f"Moved {len(moved)} file(s) to {args.move_to.resolve()}")
         if report.error_count:
             raise SystemExit(2)
         return

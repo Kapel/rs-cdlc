@@ -2,7 +2,8 @@
 
 Mirrors the on-disk layout produced by Rocksmith2014.NET ``Rocksmith2014.PSARC``
 so the read-only ``psarc_reader`` can be exercised without shipping real
-(redistributable-restricted) archives.
+(redistributable-restricted) archives. Supports the encrypted-TOC variant used
+by real Rocksmith archives (ArchiveFlags == 4).
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ import hashlib
 import struct
 import zlib
 from pathlib import Path
+
+from rocksmith_cdlc_generator.psarc_crypto import cfb128_encrypt
 
 _BLOCK_SIZE = 65536
 _TOC_ENTRY_SIZE = 30
@@ -66,14 +69,23 @@ def build_psarc(
             data_offset += len(chunk)
 
     block_table_bytes = b"".join(struct.pack(">H", v) for v in block_table)
-    toc_length = 32 + len(ordered) * _TOC_ENTRY_SIZE + len(block_table_bytes)
 
-    toc_bytes = bytearray()
-    for name, (z_begin, length, section_offset) in zip(["", *names], meta):
-        toc_bytes += _md5(name)
-        toc_bytes += struct.pack(">I", z_begin)
-        toc_bytes += _u40(length)
-        toc_bytes += _u40(toc_length + section_offset)
+    toc_body = bytearray()
+    for name, (z_begin, length, _section_offset) in zip(["", *names], meta):
+        toc_body += _md5(name)
+        toc_body += struct.pack(">I", z_begin)
+        toc_body += _u40(length)
+        toc_body += _u40(0)  # placeholder offset, patched below
+    toc_body += block_table_bytes
+
+    # Patch offsets after computing ToCLength (offsets are absolute file offsets).
+    toc_length = 32 + len(toc_body)
+    for i, (_, _, section_offset) in enumerate(meta):
+        absolute = toc_length + section_offset
+        entry_start = i * _TOC_ENTRY_SIZE
+        toc_body[entry_start + 25 : entry_start + 30] = _u40(absolute)
+
+    toc_on_disk = cfb128_encrypt(bytes(toc_body)) if encrypt_toc else bytes(toc_body)
 
     header = bytearray()
     header += b"PSAR"
@@ -89,30 +101,37 @@ def build_psarc(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as fh:
         fh.write(header)
-        fh.write(toc_bytes)
-        fh.write(block_table_bytes)
+        fh.write(toc_on_disk)
         for block in block_data:
             fh.write(block)
     return path
 
 
-def manifest_json(app_id: str | None, dlc_key: str | None, song_key: str | None,
-                  song_volume: float | None, artist: str = "Artist", title: str = "Song",
-                  persistent_id: str | None = "PERSIST") -> str:
+def manifest_json(artist: str = "Artist", title: str = "Song",
+                  dlc_key: str | None = "Artist_Song", song_key: str | None = "Song",
+                  song_volume: float | None = -12.0,
+                  persistent_id: str = "PERSIST") -> str:
+    """Build a manifest JSON matching the real Rocksmith layout.
+
+    Song attributes live under ``Entries[<persistent-id>].Attributes`` (the AppId
+    is NOT stored here; it lives in a separate ``appid.appid`` entry)."""
     import json as _json
 
     attrs: dict = {
         "ArtistName": artist,
         "SongName": title,
+        "PersistentID": persistent_id,
+        "ArrangementName": "Lead",
     }
-    if app_id is not None:
-        attrs["AppId"] = app_id
     if dlc_key is not None:
         attrs["DLCKey"] = dlc_key
     if song_key is not None:
         attrs["SongKey"] = song_key
     if song_volume is not None:
         attrs["SongVolume"] = song_volume
-    if persistent_id is not None:
-        attrs["PersistentID"] = persistent_id
-    return _json.dumps({"Attributes": attrs, "Entries": [{"Attributes": {"ArrangementName": "Lead"}}]})
+    return _json.dumps({
+        "Entries": {persistent_id: {"Attributes": attrs}},
+        "ModelName": "DLC",
+        "IterationVersion": 1,
+        "InsertRoot": "Static.Session.MusicGame",
+    })

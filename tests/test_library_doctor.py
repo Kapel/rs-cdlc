@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rocksmith_cdlc_generator.library_doctor import (
+    move_broken,
     quarantine_broken,
     render_report,
     scan_library,
@@ -12,8 +13,9 @@ from .psarc_builder import build_psarc, manifest_json
 
 
 def _healthy_entries(dlc_key: str = "Artist_Song", song_key: str = "Song", app_id: str = "248750") -> list[tuple[str, bytes, bool]]:
-    manifest = manifest_json(app_id=app_id, dlc_key=dlc_key, song_key=song_key, song_volume=-12.0)
+    manifest = manifest_json(dlc_key=dlc_key, song_key=song_key)
     return [
+        ("appid.appid", app_id.encode("ascii"), True),
         (f"manifests/songs_dlc_{dlc_key}/{dlc_key}.json", manifest.encode("utf-8"), True),
         ("guitar_lead.sng", b"LEAD", True),
         ("guitar_rhythm.sng", b"RHYTHM", True),
@@ -26,7 +28,7 @@ def _healthy_entries(dlc_key: str = "Artist_Song", song_key: str = "Song", app_i
 
 
 def test_healthy_song_reports_ok(tmp_path: Path) -> None:
-    build_psarc(tmp_path / "Artist_Song_v1_p.psarc", _healthy_entries())
+    build_psarc(tmp_path / "Artist_Song_v1_p.psarc", _healthy_entries(), encrypt_toc=True)
     report = scan_library(tmp_path)
     assert report.scanned_count == 1
     assert report.ok_count == 1
@@ -37,7 +39,8 @@ def test_healthy_song_reports_ok(tmp_path: Path) -> None:
 
 
 def test_missing_appid_is_error(tmp_path: Path) -> None:
-    build_psarc(tmp_path / "Artist_Song_v1_p.psarc", _healthy_entries(app_id=None))
+    entries = [e for e in _healthy_entries() if e[0] != "appid.appid"]
+    build_psarc(tmp_path / "Artist_Song_v1_p.psarc", entries)
     report = scan_library(tmp_path)
     song = report.songs[0]
     assert song.status == "error"
@@ -60,10 +63,12 @@ def test_corrupt_file_is_error(tmp_path: Path) -> None:
     assert report.songs[0].issues[0].code == "corrupt"
 
 
-def test_platform_mismatch_is_error(tmp_path: Path) -> None:
+def test_platform_mismatch_is_warning(tmp_path: Path) -> None:
     build_psarc(tmp_path / "Artist_Song_v1_m.psarc", _healthy_entries())
     report = scan_library(tmp_path, expected_platform="pc")
-    codes = {i.code for i in report.songs[0].issues}
+    song = report.songs[0]
+    assert song.status == "warning"
+    codes = {i.code for i in song.issues}
     assert "platform-mismatch" in codes
 
 
@@ -95,7 +100,7 @@ def test_wrong_enabler_dll_flag(tmp_path: Path) -> None:
 
 
 def test_render_report_mentions_errors(tmp_path: Path) -> None:
-    build_psarc(tmp_path / "Artist_Song_v1_p.psarc", _healthy_entries(app_id=None))
+    build_psarc(tmp_path / "Artist_Song_v1_p.psarc", [e for e in _healthy_entries() if e[0] != "appid.appid"])
     report = scan_library(tmp_path)
     text = render_report(report)
     assert "missing-appid" in text
@@ -112,3 +117,26 @@ def test_quarantine_copies_error_files(tmp_path: Path) -> None:
     assert (destination / "broken_p.psarc").is_file()
     assert broken.is_file()
 
+
+def test_move_broken_moves_error_files(tmp_path: Path) -> None:
+    broken = tmp_path / "broken_p.psarc"
+    broken.write_bytes(b"PSAR" + b"\x00" * 64)
+    build_psarc(tmp_path / "Artist_Song_v1_p.psarc", _healthy_entries())
+    report = scan_library(tmp_path)
+    destination = tmp_path / "issues"
+    moved = move_broken(report, destination)
+    assert len(moved) == 1
+    assert (destination / "broken_p.psarc").is_file()
+    assert not broken.exists()
+
+
+def test_multi_xblock_pack_is_warning_not_error(tmp_path: Path) -> None:
+    entries = _healthy_entries() + [("song2.xblock", b"\x00" * 8, True)]
+    build_psarc(tmp_path / "pack_p.psarc", entries)
+    report = scan_library(tmp_path)
+    song = report.songs[0]
+    assert song.status == "warning"
+    codes = {i.code for i in song.issues}
+    assert "song-pack" in codes
+    assert "too-many-arrangements" not in codes
+    assert "bad-xblock" not in codes

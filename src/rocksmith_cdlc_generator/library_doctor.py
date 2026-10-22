@@ -1,8 +1,9 @@
 """Library doctor: scan a folder of Rocksmith ``.psarc`` files and surface health issues.
 
 Read-only by design. The scanner never modifies the source archives or the live
-Rocksmith installation. An optional ``quarantine`` directory (kept outside the
-scanned folder by convention) can receive *copies* of broken files for review.
+Rocksmith installation. An optional ``quarantine``/``move-to`` directory can
+receive *copies* (or moved files) of broken songs for review; by convention the
+destination lives outside the scanned ``dlc`` folder.
 """
 
 from __future__ import annotations
@@ -14,13 +15,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .psarc_reader import EncryptedTocError, PsarcReader, PsarcReaderError
+from .psarc_reader import PsarcReader, PsarcReaderError
 
 # RS2014 Remastered crashes above this many arrangements in a single song.
 MAX_ARRANGEMENTS = 5
 
-# The correct CDLC-enabler D3DX9_42.dll is ~129 KB; the stock DirectX one is ~1.8 MB.
-ENABLER_DLL_MAX_BYTES = 300_000
+# The correct CDLC-enabler D3DX9_42.dll is ~129 KB (classic) or ~253 KB (RSMods);
+# the stock DirectX one is ~1.8 MB. Anything >= ~1 MB is almost certainly the stock DLL.
+ENABLER_DLL_MAX_BYTES = 1_000_000
 
 
 class Issue(BaseModel):
@@ -84,7 +86,7 @@ def _detect_platform(filename: str) -> str:
         return "pc"
     if lower.endswith("_m.psarc"):
         return "mac"
-    if lower.endswith("_xbox"):
+    if lower.endswith("_xbox") or lower.endswith("_xbox.psarc"):
         return "xbox"
     if lower.endswith("_ps3.psarc.edat"):
         return "ps3"
@@ -105,6 +107,7 @@ def _classify_entries(entries: tuple[str, ...]) -> dict[str, Any]:
     xblock = [e for e in entries if e.lower().endswith(".xblock")]
     art = [e for e in entries if e.lower().endswith(".dds") and "album" in e.lower()]
     manifests = [e for e in entries if e.lower().endswith(".json") and "manifest" in e.lower()]
+    appid = [e for e in entries if e.lower().endswith(".appid") or e.lower().endswith("appid")]
     return {
         "lead": lead,
         "rhythm": rhythm,
@@ -114,16 +117,26 @@ def _classify_entries(entries: tuple[str, ...]) -> dict[str, Any]:
         "xblock": xblock,
         "art": art,
         "manifests": manifests,
+        "appid": appid,
     }
 
 
 def _extract_manifest_attrs(obj: Any) -> dict[str, Any]:
-    attrs: dict[str, Any] = {}
-    if isinstance(obj, dict):
-        song_attrs = obj.get("Attributes") or {}
-        if isinstance(song_attrs, dict):
-            attrs = dict(song_attrs)
-    return attrs
+    """Song-level attributes live under Entries[<persistent-id>].Attributes."""
+    if not isinstance(obj, dict):
+        return {}
+    entries = obj.get("Entries")
+    if isinstance(entries, dict) and entries:
+        first = next(iter(entries.values()))
+        if isinstance(first, dict):
+            attrs = first.get("Attributes")
+            if isinstance(attrs, dict):
+                return dict(attrs)
+    # Fallback: some archives use a top-level Attributes block.
+    top = obj.get("Attributes")
+    if isinstance(top, dict):
+        return dict(top)
+    return {}
 
 
 def _extract_arrangement_names(obj: Any) -> list[str]:
@@ -148,7 +161,7 @@ def _extract_arrangement_names(obj: Any) -> list[str]:
     return names
 
 
-def _read_manifest_attrs(reader: PsarcReader, manifests: list[str]) -> tuple[dict[str, Any], list[str]]:
+def _read_manifest_data(reader: PsarcReader, manifests: list[str]) -> tuple[dict[str, Any], list[str]]:
     song_attrs: dict[str, Any] = {}
     arrangement_names: list[str] = []
     for path in manifests:
@@ -162,9 +175,29 @@ def _read_manifest_attrs(reader: PsarcReader, manifests: list[str]) -> tuple[dic
     return song_attrs, arrangement_names
 
 
+def _read_appid(reader: PsarcReader, appid_entries: list[str]) -> str | None:
+    for path in appid_entries:
+        try:
+            text = reader.read_entry_text(path).strip()
+        except (KeyError, PsarcReaderError):
+            continue
+        if text:
+            return text
+    return None
+
+
 def _diagnose_file(path: Path, expected_platform: str | None) -> SongDiagnostic:
     diag = SongDiagnostic(path=str(path), platform=_detect_platform(path.name), status="ok")
     issues: list[Issue] = []
+
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    if size == 0:
+        diag.status = "error"
+        diag.issues = [Issue(code="empty-file", severity="error", message="file is empty (0 bytes)")]
+        return diag
 
     if expected_platform and diag.platform != expected_platform:
         if diag.platform == "unknown":
@@ -173,23 +206,26 @@ def _diagnose_file(path: Path, expected_platform: str | None) -> SongDiagnostic:
             issues.append(
                 Issue(
                     code="platform-mismatch",
-                    severity="error",
-                    message=f"expected {expected_platform} but file targets {diag.platform}",
+                    severity="warning",
+                    message=f"targets {diag.platform} but the expected platform is {expected_platform}",
                 )
             )
 
     try:
         reader = PsarcReader(path)
-    except EncryptedTocError as exc:
-        diag.status = "error"
-        diag.issues = [Issue(code="encrypted-toc", severity="error", message=str(exc))]
-        return diag
     except PsarcReaderError as exc:
         diag.status = "error"
         diag.issues = [Issue(code="corrupt", severity="error", message=str(exc))]
         return diag
 
-    entries = reader.entries
+    try:
+        entries = reader.entries
+    except PsarcReaderError as exc:
+        diag.status = "error"
+        diag.issues = [Issue(code="corrupt", severity="error", message=str(exc))]
+        reader.close()
+        return diag
+
     cls = _classify_entries(entries)
     diag.lead_sng = len(cls["lead"])
     diag.rhythm_sng = len(cls["rhythm"])
@@ -200,8 +236,8 @@ def _diagnose_file(path: Path, expected_platform: str | None) -> SongDiagnostic:
     diag.album_art = len(cls["art"])
     diag.manifests = len(cls["manifests"])
 
-    song_attrs, arrangement_names = _read_manifest_attrs(reader, cls["manifests"])
-    diag.app_id = song_attrs.get("AppId") or None
+    song_attrs, arrangement_names = _read_manifest_data(reader, cls["manifests"])
+    diag.app_id = _read_appid(reader, cls["appid"]) or song_attrs.get("AppId") or None
     diag.dlc_key = song_attrs.get("DLCKey") or None
     diag.song_key = song_attrs.get("SongKey") or None
     diag.persistent_id = song_attrs.get("PersistentID") or None
@@ -210,35 +246,51 @@ def _diagnose_file(path: Path, expected_platform: str | None) -> SongDiagnostic:
     diag.song_volume = song_attrs.get("SongVolume")
     diag.arrangement_count = len(cls["manifests"]) or len(arrangement_names)
     diag.arrangement_names = arrangement_names
+    reader.close()
 
-    if not cls["manifests"]:
-        issues.append(Issue(code="missing-manifest", severity="error", message="no manifest JSON found"))
-    if not cls["wem"]:
-        issues.append(Issue(code="missing-audio", severity="error", message="no WEM audio found"))
-    if not cls["bnk"]:
-        issues.append(Issue(code="missing-soundbank", severity="error", message="no sound bank (.bnk) found"))
-    if len(cls["xblock"]) != 1:
-        issues.append(
-            Issue(code="bad-xblock", severity="error", message=f"expected exactly one xblock, found {len(cls['xblock'])}")
-        )
-    if not cls["lead"] and not cls["rhythm"] and not cls["bass"]:
-        issues.append(Issue(code="missing-arrangements", severity="error", message="no instrumental SNG arrangement found"))
-    if diag.arrangement_count > MAX_ARRANGEMENTS:
+    pack_prefixes = {e.split("/")[1] for e in cls["manifests"] if e.startswith("manifests/") and "/" in e}
+    is_pack = len(cls["xblock"]) > 1 or len(pack_prefixes) > 1
+
+    if not entries:
+        issues.append(Issue(code="empty-manifest", severity="error", message="PSARC manifest is empty"))
+
+    if is_pack:
         issues.append(
             Issue(
-                code="too-many-arrangements",
-                severity="error",
-                message=f"{diag.arrangement_count} arrangements exceeds the RS2014 Remastered limit of {MAX_ARRANGEMENTS}",
+                code="song-pack",
+                severity="warning",
+                message=f"multi-song pack ({len(pack_prefixes)} songs); single-song content checks skipped",
             )
         )
-    if not diag.app_id or diag.app_id in ("0", "00000000"):
-        issues.append(Issue(code="missing-appid", severity="error", message="AppId missing or zero; song will not appear in-game"))
-    if diag.song_volume is None:
-        issues.append(Issue(code="missing-volume", severity="warning", message="SongVolume missing; may be too loud or quiet"))
-    if not diag.dlc_key:
-        issues.append(Issue(code="missing-dlckey", severity="warning", message="DLCKey missing; duplicate detection unreliable"))
-    if not cls["art"]:
-        issues.append(Issue(code="missing-art", severity="warning", message="no album-art DDS; CFSM can restore default art"))
+    else:
+        if not cls["manifests"]:
+            issues.append(Issue(code="missing-manifest", severity="error", message="no manifest JSON found"))
+        if not cls["wem"]:
+            issues.append(Issue(code="missing-audio", severity="error", message="no WEM audio found"))
+        if not cls["bnk"]:
+            issues.append(Issue(code="missing-soundbank", severity="error", message="no sound bank (.bnk) found"))
+        if len(cls["xblock"]) != 1:
+            issues.append(
+                Issue(code="bad-xblock", severity="error", message=f"expected exactly one xblock, found {len(cls['xblock'])}")
+            )
+        if not cls["lead"] and not cls["rhythm"] and not cls["bass"]:
+            issues.append(Issue(code="missing-arrangements", severity="error", message="no instrumental SNG arrangement found"))
+        if diag.arrangement_count > MAX_ARRANGEMENTS:
+            issues.append(
+                Issue(
+                    code="too-many-arrangements",
+                    severity="error",
+                    message=f"{diag.arrangement_count} arrangements exceeds the RS2014 Remastered limit of {MAX_ARRANGEMENTS}",
+                )
+            )
+        if not diag.app_id or diag.app_id in ("0", "00000000"):
+            issues.append(Issue(code="missing-appid", severity="error", message="AppId missing or zero; song will not appear in-game"))
+        if diag.song_volume is None:
+            issues.append(Issue(code="missing-volume", severity="warning", message="SongVolume missing; may be too loud or quiet"))
+        if not diag.dlc_key:
+            issues.append(Issue(code="missing-dlckey", severity="warning", message="DLCKey missing; duplicate detection unreliable"))
+        if not cls["art"]:
+            issues.append(Issue(code="missing-art", severity="warning", message="no album-art DDS; CFSM can restore default art"))
 
     if issues:
         diag.issues = issues
@@ -256,22 +308,20 @@ def _check_enabler_dll(rocksmith_root: Path) -> EnablerDllCheck:
             message="D3DX9_42.dll not found in the Rocksmith root; CDLC will not appear. Run the CDLC Enabler.",
         )
     size = dll.stat().st_size
-    if size > ENABLER_DLL_MAX_BYTES:
+    if size >= ENABLER_DLL_MAX_BYTES:
         return EnablerDllCheck(
             present=True,
             path=str(dll),
             size_bytes=size,
             ok=False,
-            message=(
-                f"D3DX9_42.dll is {size} bytes (~1.8 MB stock DirectX DLL); the ~129 KB CDLC enabler is required."
-            ),
+            message=f"D3DX9_42.dll is {size} bytes; that is the stock DirectX DLL (~1.8 MB), not the CDLC enabler (~129 KB classic / ~253 KB RSMods).",
         )
     return EnablerDllCheck(
         present=True,
         path=str(dll),
         size_bytes=size,
         ok=True,
-        message="CDLC enabler D3DX9_42.dll looks correct (~129 KB).",
+        message=f"CDLC enabler D3DX9_42.dll present ({size} bytes).",
     )
 
 
@@ -294,12 +344,14 @@ def scan_library(
     *,
     expected_platform: str | None = None,
     rocksmith_root: Path | None = None,
+    recursive: bool = False,
 ) -> LibraryReport:
     directory = directory.resolve()
     if not directory.is_dir():
         raise FileNotFoundError(directory)
 
-    files = sorted(p for p in directory.rglob("*.psarc") if p.is_file())
+    pattern = directory.rglob("*.psarc") if recursive else directory.glob("*.psarc")
+    files = sorted(p for p in pattern if p.is_file())
 
     report = LibraryReport()
     for path in files:
@@ -357,3 +409,22 @@ def quarantine_broken(report: LibraryReport, destination: Path) -> list[Path]:
         shutil.copy2(source, target)
         copied.append(target)
     return copied
+
+
+def move_broken(report: LibraryReport, destination: Path) -> list[Path]:
+    """Move files that failed with an error into the destination directory."""
+    destination = destination.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    moved: list[Path] = []
+    for song in report.songs:
+        if song.status != "error":
+            continue
+        source = Path(song.path)
+        if not source.is_file():
+            continue
+        target = destination / source.name
+        if target.exists():
+            target = destination / f"{source.stem}__dup{source.suffix}"
+        shutil.move(str(source), str(target))
+        moved.append(target)
+    return moved
