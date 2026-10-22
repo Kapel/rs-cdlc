@@ -13,7 +13,7 @@ from .dlcbuilder import prepare_dlcbuilder_project
 from .guitar_authoring import build_project_guitar_chart
 from .guitar_validation import validate_guitar_project, validate_guitar_project_to_disk
 from .guitarpro_import import import_project_guitarpro
-from .library_doctor import move_broken, quarantine_broken, render_report, scan_library
+from .library_doctor import fix_base_game_appid, move_broken, quarantine_broken, render_report, scan_library
 from .mapping_pipeline import map_project_bass
 from .metadata_providers import identify_project_metadata, select_project_metadata
 from .midi_import import import_project_midi
@@ -259,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", action="store_true", help="Print the full report as JSON")
     doctor.add_argument("--quarantine", type=Path, help="Copy error files into this directory for review")
     doctor.add_argument("--move-to", type=Path, help="MOVE error files into this directory (removes them from the dlc folder)")
+    doctor.add_argument("--fix-appid", action="store_true", help="Rewrite base-game AppIds (221680/205190) to Cherub Rock (248750) in place")
     return parser
 
 
@@ -473,6 +474,13 @@ def main() -> None:
         if args.move_to is not None:
             moved = move_broken(report, args.move_to)
             print(f"Moved {len(moved)} file(s) to {args.move_to.resolve()}")
+        if args.fix_appid:
+            fixed = 0
+            for song in report.songs:
+                if any(i.code == "base-game-appid" for i in song.issues):
+                    if fix_base_game_appid(Path(song.path)) is not None:
+                        fixed += 1
+            print(f"Fixed AppId on {fixed} file(s)")
         if report.error_count:
             raise SystemExit(2)
         return

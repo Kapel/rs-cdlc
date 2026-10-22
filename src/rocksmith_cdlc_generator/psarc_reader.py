@@ -249,6 +249,16 @@ class PsarcReader:
     def read_entry_text(self, name: str, encoding: str = "utf-8") -> str:
         return self.read_entry(name).decode(encoding, errors="replace")
 
+    def entry_offset(self, name: str) -> int:
+        if name not in self._name_to_index:
+            raise KeyError(name)
+        return self._entries[self._name_to_index[name]].offset
+
+    def entry_length(self, name: str) -> int:
+        if name not in self._name_to_index:
+            raise KeyError(name)
+        return self._entries[self._name_to_index[name]].length
+
     @staticmethod
     def entry_digest(name: str) -> bytes:
         return hashlib.md5(name.encode("ascii", errors="replace")).digest()

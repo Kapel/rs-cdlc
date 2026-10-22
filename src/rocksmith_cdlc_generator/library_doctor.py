@@ -24,6 +24,11 @@ MAX_ARRANGEMENTS = 5
 # the stock DirectX one is ~1.8 MB. Anything >= ~1 MB is almost certainly the stock DLL.
 ENABLER_DLL_MAX_BYTES = 1_000_000
 
+# AppIds of the Rocksmith base games; CDLC keyed to these (instead of a DLC
+# AppId like Cherub Rock) does not load in-game.
+BASE_GAME_APP_IDS = {"221680", "205190"}
+CHERUB_ROCK_APP_ID = "248750"
+
 
 class Issue(BaseModel):
     code: str
@@ -285,7 +290,7 @@ def _diagnose_file(path: Path, expected_platform: str | None) -> SongDiagnostic:
             )
         if not diag.app_id or diag.app_id in ("0", "00000000"):
             issues.append(Issue(code="missing-appid", severity="error", message="AppId missing or zero; song will not appear in-game"))
-        elif diag.app_id in ("221680", "205190"):
+        elif diag.app_id in BASE_GAME_APP_IDS:
             issues.append(
                 Issue(
                     code="base-game-appid",
@@ -436,3 +441,34 @@ def move_broken(report: LibraryReport, destination: Path) -> list[Path]:
         shutil.move(str(source), str(target))
         moved.append(target)
     return moved
+
+
+def fix_base_game_appid(path: Path, target: str = CHERUB_ROCK_APP_ID) -> str | None:
+    """Rewrite a base-game AppId to a DLC AppId in place.
+
+    Only rewrites when the entry is stored uncompressed and the new value is the
+    same byte length as the old one (so the archive structure is unchanged).
+    Returns the previous AppId if fixed, else None.
+    """
+    path = Path(path)
+    with PsarcReader(path) as reader:
+        appid_entries = [e for e in reader.entries if e.lower().endswith(".appid")]
+        if not appid_entries:
+            return None
+        name = appid_entries[0]
+        current = reader.read_entry_text(name).strip()
+        if current not in BASE_GAME_APP_IDS:
+            return None
+        target_bytes = target.encode("ascii")
+        if len(target_bytes) != len(current):
+            return None
+        offset = reader.entry_offset(name)
+
+    with open(path, "r+b") as fh:
+        fh.seek(offset)
+        raw = fh.read(len(current))
+        if raw.decode("ascii", errors="replace") != current:
+            return None  # entry is compressed or already changed
+        fh.seek(offset)
+        fh.write(target_bytes)
+    return current

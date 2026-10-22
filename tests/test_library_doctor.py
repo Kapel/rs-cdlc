@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rocksmith_cdlc_generator.library_doctor import (
+    fix_base_game_appid,
     move_broken,
     quarantine_broken,
     render_report,
@@ -15,7 +16,7 @@ from .psarc_builder import build_psarc, manifest_json
 def _healthy_entries(dlc_key: str = "Artist_Song", song_key: str = "Song", app_id: str = "248750") -> list[tuple[str, bytes, bool]]:
     manifest = manifest_json(dlc_key=dlc_key, song_key=song_key)
     return [
-        ("appid.appid", app_id.encode("ascii"), True),
+        ("appid.appid", app_id.encode("ascii"), False),
         (f"manifests/songs_dlc_{dlc_key}/{dlc_key}.json", manifest.encode("utf-8"), True),
         ("guitar_lead.sng", b"LEAD", True),
         ("guitar_rhythm.sng", b"RHYTHM", True),
@@ -149,3 +150,12 @@ def test_base_game_appid_is_warning(tmp_path: Path) -> None:
     assert song.status == "warning"
     codes = {i.code for i in song.issues}
     assert "base-game-appid" in codes
+
+
+def test_fix_base_game_appid(tmp_path: Path) -> None:
+    p = tmp_path / "Artist_Song_v1_p.psarc"
+    build_psarc(p, _healthy_entries(app_id="221680"), encrypt_toc=True)
+    assert fix_base_game_appid(p) == "221680"
+    report = scan_library(tmp_path)
+    assert report.songs[0].app_id == "248750"
+    assert "base-game-appid" not in {i.code for i in report.songs[0].issues}
