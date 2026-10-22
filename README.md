@@ -85,6 +85,7 @@ cdlc prepare-dlcbuilder "projects\artist-song" --album "Album" --year 2026 --cov
 cdlc stage-build "projects\artist-song"
 cdlc launch-dlcbuilder "projects\artist-song" --executable "C:\Path\To\DLCBuilder.exe"
 cdlc register-psarc "projects\artist-song" --psarc "C:\Staging\Song_p.psarc"
+cdlc doctor "C:\Program Files (x86)\Steam\steamapps\common\Rocksmith2014\dlc" --platform pc
 ```
 
 ### Symbolic source import and reconciliation
@@ -110,6 +111,12 @@ Rocksmith XML currently exports imported `palm_mute`, `harmonic`, `tremolo_picki
 `stage-build` runs the packaging gate, resolves every DLC Builder file reference, and records SHA-256 hashes and sizes in `build/staging/build_readiness.json`.
 
 `launch-dlcbuilder` performs the same readiness checks before opening the selected `.rs2dlc` file. `register-psarc` verifies the returned PSARC signature/header, hashes it, and stages it project-locally without installing it.
+
+### Library doctor
+
+`cdlc doctor` scans a folder of Rocksmith `.psarc` files read-only and reports
+health issues (corrupt archives, missing audio/appid, platform mismatch,
+duplicate keys, >5 arrangements, wrong enabler DLL). See `docs/library-doctor.md`.
 
 ## Key outputs
 
