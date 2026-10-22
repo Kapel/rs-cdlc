@@ -140,3 +140,12 @@ def test_multi_xblock_pack_is_warning_not_error(tmp_path: Path) -> None:
     assert "song-pack" in codes
     assert "too-many-arrangements" not in codes
     assert "bad-xblock" not in codes
+
+
+def test_base_game_appid_is_warning(tmp_path: Path) -> None:
+    build_psarc(tmp_path / "Artist_Song_v1_p.psarc", _healthy_entries(app_id="221680"))
+    report = scan_library(tmp_path)
+    song = report.songs[0]
+    assert song.status == "warning"
+    codes = {i.code for i in song.issues}
+    assert "base-game-appid" in codes

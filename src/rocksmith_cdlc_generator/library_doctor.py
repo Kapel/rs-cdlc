@@ -285,6 +285,14 @@ def _diagnose_file(path: Path, expected_platform: str | None) -> SongDiagnostic:
             )
         if not diag.app_id or diag.app_id in ("0", "00000000"):
             issues.append(Issue(code="missing-appid", severity="error", message="AppId missing or zero; song will not appear in-game"))
+        elif diag.app_id in ("221680", "205190"):
+            issues.append(
+                Issue(
+                    code="base-game-appid",
+                    severity="warning",
+                    message=f"keyed to the base-game AppId {diag.app_id} instead of a DLC AppId (Cherub Rock 248750); may not appear in-game",
+                )
+            )
         if diag.song_volume is None:
             issues.append(Issue(code="missing-volume", severity="warning", message="SongVolume missing; may be too loud or quiet"))
         if not diag.dlc_key:
